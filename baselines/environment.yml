@@ -1,0 +1,12 @@
+name: af_arcade
+dependencies:
+  - python=3.8
+  - pip
+  - pip:
+    - -e ./airforce-arcade 
+    - tensorflow
+    - torch
+    - opencv-python
+    - gym
+    - matplotlib
+    - ray[rllib]

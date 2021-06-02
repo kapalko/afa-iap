@@ -1,0 +1,49 @@
+refueling-sac-fcnet-no-stack-im2:
+    env: Refueling-v0
+    run: SAC
+    stop:
+        episode_reward_mean: 99999 # use time steps as stopping criteria
+        timesteps_total: 8000000
+    config:
+        num_workers: 8
+        num_gpus: 1
+        framework: tf
+        # environment
+        env_config:
+          no_graphics: true
+          input_mode: 2 # 1: pitch-only, 2: pitch and throttle, 3: all controls
+          randomize_fighter_start_pose: true
+          randomize_fighter_start_thrust: false
+          reward_mode: 2
+          stacked_vec_obs: 1
+        observation_filter: MeanStdFilter
+        # learning
+        no_done_at_end: true
+        tau: 0.00003
+        initial_alpha: 1.0
+        target_entropy: null
+        n_step: 1
+        timesteps_per_iteration: 100
+        # replay buffer
+        buffer_size: 1000000
+        prioritized_replay: false
+        # opimization
+        optimization:
+          actor_learning_rate: 0.0003
+          critic_learning_rate: 0.0003
+          entropy_learning_rate: 0.0003
+        grad_clip: null
+        learning_starts: 1500
+        rollout_fragment_length: 1
+        train_batch_size: 256
+        target_network_update_freq: 0
+        # model
+        twin_q: true
+        use_state_preprocessor: false
+        normalize_actions: true
+        Q_model:
+          fcnet_activation: [64, 32, 16]
+          fcnet_activation: elu
+        policy_model:
+          fcnet_activation: [64, 32, 16]
+          fcnet_activation: elu

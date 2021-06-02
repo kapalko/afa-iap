@@ -1,0 +1,42 @@
+timedwaypoints-ppo-ncp:
+    env: TimedWaypoints-v0
+    run: PPO
+    stop:
+        episode_reward_mean: 99999 # use time steps as stopping criteria
+        timesteps_total: 8000000
+    config:
+        num_workers: 1
+        framework: tf
+        # environment
+        env_config:
+          no_graphics: true
+        # sgd-related
+        lr: 0.0002
+        lr_schedule: [[0, 0.0002], [8000000, 0.0]]
+        num_sgd_iter: 8
+        train_batch_size: 10240
+        sgd_minibatch_size: 512
+        # MDP-related
+        gamma: 0.99
+        rollout_fragment_length: 64
+        # value function
+        vf_share_layers: false # ncp don't work with shared value function
+        vf_loss_coeff: 1.0
+        # PPO-specific
+        entropy_coeff: 0.01
+        lambda: 0.95
+        kl_target: 0.2
+        # model
+        model:
+          custom_model: ncp   
+          max_seq_len: 32
+          custom_model_config:
+            sensory_fanout: 4
+            inter_neurons: 12
+            inter_fanout: 2
+            command_neurons: 8
+            recurrent_command_synapses: 4
+            motor_fanin: 6
+          # network arch of value function
+          fcnet_hiddens: [16, 32, 32]
+          fcnet_activation: relu
