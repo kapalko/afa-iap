@@ -3,3 +3,7 @@ from airforce_arcade.envs.dronedodgeball import DroneDodgeBall
 from airforce_arcade.envs.refueling import Refueling
 from airforce_arcade.envs.timedwaypoints import TimedWaypoints
 from airforce_arcade.envs.canyonrun import CanyonRun
+from airforce_arcade.envs.wrapper import FlattenActionWrapper
+from airforce_arcade.envs.dronetag import DroneTag
+from airforce_arcade.envs.fireandice import FireandIce
+from airforce_arcade.envs.droneduel import DroneDuel

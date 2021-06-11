@@ -1,3 +1,5 @@
+import inspect
+from functools import partial
 import itertools
 import numpy as np
 from typing import Any, Dict, List, Tuple, Union
@@ -22,6 +24,12 @@ logger = logging_util.get_logger(__name__)
 logging_util.set_log_level(logging_util.INFO)
 
 GymStepResult = Tuple[np.ndarray, float, bool, Dict]
+MultiAgentGymStepResult = Tuple[Dict[str, np.ndarray], \
+    Dict[str, float], Dict[str, bool], Dict[str, Dict]]
+
+
+def dictOfList2listOfDict(dictOfList):
+    return [dict(zip(dictOfList, i)) for i in zip(*dictOfList.values())]
 
 
 class UnityToGymWrapper(gym.Env):
@@ -57,27 +65,20 @@ class UnityToGymWrapper(gym.Env):
 
         # Save the step result from the last time all Agents requested decisions.
         self._previous_decision_step: DecisionSteps = None
-        self._flattener = None
         # Hidden flag used by Atari environments to determine if the game is over
         self.game_over = False
         self._allow_multiple_obs = allow_multiple_obs
 
-        # Check brain configuration
-        if len(self._env.behavior_specs) != 1:
-            raise UnityGymException(
-                "There can only be one behavior in a UnityEnvironment "
-                "if it is wrapped in a gym."
-            )
+        self.name = list(self._env.behavior_specs.keys())
+        self.group_spec = {name: self._env.behavior_specs[name] for name in self.name}
 
-        self.name = list(self._env.behavior_specs.keys())[0]
-        self.group_spec = self._env.behavior_specs[self.name]
-
-        if self._get_n_vis_obs() == 0 and self._get_vec_obs_size() == 0:
+        if np.any([self._get_n_vis_obs(v) == 0 for v in self.name]) and \
+            np.any([self._get_vec_obs_size(v) == 0 for v in self.name]):
             raise UnityGymException(
                 "There are no observations provided by the environment."
             )
 
-        if not self._get_n_vis_obs() >= 1 and uint8_visual:
+        if not np.any([self._get_n_vis_obs(v) >= 1 for v in self.name]) and uint8_visual:
             logger.warning(
                 "uint8_visual was set to true, but visual observations are not in use. "
                 "This setting will not have any effect."
@@ -85,7 +86,7 @@ class UnityToGymWrapper(gym.Env):
         else:
             self.uint8_visual = uint8_visual
         if (
-            self._get_n_vis_obs() + self._get_vec_obs_size() >= 2
+            np.any([self._get_n_vis_obs(v) > 0 and self._get_vec_obs_size(v) > 0 for v in self.name])
             and not self._allow_multiple_obs
         ):
             logger.warning(
@@ -96,72 +97,76 @@ class UnityToGymWrapper(gym.Env):
             )
 
         # Check for number of agents in scene.
-        decision_steps, _ = self._env.get_steps(self.name)
-        self._check_agents(len(decision_steps))
+        decision_steps = self._multi_agent_call(self._env.get_steps, {n: n for n in self.name}, 0)
         self._previous_decision_step = decision_steps
 
         # Set action spaces
-        if self.group_spec.action_spec.is_discrete():
-            self.action_size = self.group_spec.action_spec.discrete_size
-            branches = self.group_spec.action_spec.discrete_branches
-            if self.group_spec.action_spec.discrete_size == 1:
-                self._action_space = spaces.Discrete(branches[0])
-            else:
-                if flatten_branched:
-                    self._flattener = ActionFlattener(branches)
-                    self._action_space = self._flattener.action_space
+        self.action_size = dict()
+        self._action_space = dict()
+        self._flattener = {n: None for n in self.name}
+        for name, group_spec in self.group_spec.items():
+            if group_spec.action_spec.is_discrete():
+                self.action_size[name] = group_spec.action_spec.discrete_size
+                branches = group_spec.action_spec.discrete_branches
+                if group_spec.action_spec.discrete_size == 1:
+                    self._action_space[name] = spaces.Discrete(branches[0])
                 else:
-                    self._action_space = spaces.MultiDiscrete(branches)
+                    if flatten_branched:
+                        self._flattener[name] = ActionFlattener(branches)
+                        self._action_space[name] = self._flattener[name].action_space
+                    else:
+                        self._action_space[name] = spaces.MultiDiscrete(branches)
 
-        elif self.group_spec.action_spec.is_continuous():
-            if flatten_branched:
-                logger.warning(
-                    "The environment has a non-discrete action space. It will "
-                    "not be flattened."
+            elif group_spec.action_spec.is_continuous():
+                if flatten_branched:
+                    logger.warning(
+                        "The environment has a non-discrete action space. It will "
+                        "not be flattened."
+                    )
+
+                self.action_size[name] = group_spec.action_spec.continuous_size
+                high = np.array([1] * group_spec.action_spec.continuous_size)
+                self._action_space[name] = spaces.Box(-high, high, dtype=np.float32)
+
+            else:
+                raise UnityGymException(
+                    "The gym wrapper does not provide explicit support for both discrete "
+                    "and continuous actions."
                 )
 
-            self.action_size = self.group_spec.action_spec.continuous_size
-            high = np.array([1] * self.group_spec.action_spec.continuous_size)
-            self._action_space = spaces.Box(-high, high, dtype=np.float32)
-        else:
-            raise UnityGymException(
-                "The gym wrapper does not provide explicit support for both discrete "
-                "and continuous actions."
-            )
-
         # Set observations space
-        list_spaces: List[gym.Space] = []
-        shapes = self._get_vis_obs_shape()
-        for shape in shapes:
-            if uint8_visual:
-                list_spaces.append(spaces.Box(0, 255, dtype=np.uint8, shape=shape))
+        self._observation_space = dict()
+        for name in self.name:
+            list_spaces: List[gym.Space] = []
+            for shape in self._get_vis_obs_shape(name):
+                if uint8_visual:
+                    list_spaces.append(spaces.Box(0, 255, dtype=np.uint8, shape=shape))
+                else:
+                    list_spaces.append(spaces.Box(0, 1, dtype=np.float32, shape=shape))
+            if self._get_vec_obs_size(name) > 0:
+                # vector observation is last
+                high = np.array([np.inf] * self._get_vec_obs_size(name))
+                list_spaces.append(spaces.Box(-high, high, dtype=np.float32))
+            if self._allow_multiple_obs:
+                self._observation_space[name] = spaces.Tuple(list_spaces)
             else:
-                list_spaces.append(spaces.Box(0, 1, dtype=np.float32, shape=shape))
-        if self._get_vec_obs_size() > 0:
-            # vector observation is last
-            high = np.array([np.inf] * self._get_vec_obs_size())
-            list_spaces.append(spaces.Box(-high, high, dtype=np.float32))
-        if self._allow_multiple_obs:
-            self._observation_space = spaces.Tuple(list_spaces)
-        else:
-            self._observation_space = list_spaces[0]  # only return the first one
+                self._observation_space[name] = list_spaces[0]  # only return the first one
 
-    def reset(self) -> Union[List[np.ndarray], np.ndarray]:
+    def reset(self) -> Dict[str, Union[List[np.ndarray], np.ndarray]]:
         """Resets the state of the environment and returns an initial observation.
-        Returns: observation (object/list): the initial observation of the
+        Returns: observation (dict of object/list): the initial observation of the
         space.
         """
         if not self.game_over:
-            self._env.reset()
-        decision_step, _ = self._env.get_steps(self.name)
-        n_agents = len(decision_step)
-        self._check_agents(n_agents)
+            for i in range(len(self.name)):
+                self._env.reset()
+        decision_step, terminal_step = dictOfList2listOfDict(self._multi_agent_call(\
+            self._env.get_steps, {n: n for n in self.name}))
         self.game_over = False
+        res = self._multi_agent_call(self._single_step, decision_step, 0)
+        return res
 
-        res: GymStepResult = self._single_step(decision_step)
-        return res[0]
-
-    def step(self, action: List[Any]) -> GymStepResult:
+    def step(self, actions: Dict[str, List[Any]]) -> MultiAgentGymStepResult:
         """Run one timestep of the environment's dynamics. When end of
         episode is reached, you are responsible for calling `reset()`
         to reset this environment's state.
@@ -169,51 +174,55 @@ class UnityToGymWrapper(gym.Env):
         Args:
             action (object/list): an action provided by the environment
         Returns:
-            observation (object/list): agent's observation of the current environment
-            reward (float/list) : amount of reward returned after previous action
-            done (boolean/list): whether the episode has ended.
-            info (dict): contains auxiliary diagnostic information.
+            observation (dict of object/list): agent's observation of the current environment
+            reward (dict of float/list) : amount of reward returned after previous action
+            done (dict of boolean/list): whether the episode has ended.
+            info (dict of dict): contains auxiliary diagnostic information.
         """
-        if self._flattener is not None:
-            # Translate action into list
-            action = self._flattener.lookup_action(action)
+        for name in self.name:
+            action = actions[name]
+            if self._flattener[name] is not None:
+                # Translate action into list
+                action = self._flattener[name].lookup_action(action)
 
-        action = np.array(action).reshape((1, self.action_size))
+            action = np.array(action).reshape((1, self.action_size[name]))
 
-        action_tuple = ActionTuple()
-        if self.group_spec.action_spec.is_continuous():
-            action_tuple.add_continuous(action)
-        else:
-            action_tuple.add_discrete(action)
-        self._env.set_actions(self.name, action_tuple)
+            action_tuple = ActionTuple()
+            if self.group_spec[name].action_spec.is_continuous():
+                action_tuple.add_continuous(action)
+            else:
+                action_tuple.add_discrete(action)
+            self._env.set_actions(name, action_tuple)
 
-        self._env.step()
-        decision_step, terminal_step = self._env.get_steps(self.name)
-        self._check_agents(max(len(decision_step), len(terminal_step)))
-        if len(terminal_step) != 0:
+        self._env.step() # NOTE: step only happens when all actions set
+
+        decision_step, terminal_step = dictOfList2listOfDict(self._multi_agent_call(\
+            self._env.get_steps, {n: n for n in self.name}))
+
+        if np.any([len(v) != 0 for v in terminal_step.values()]):
             # The agent is done
             self.game_over = True
-            return self._single_step(terminal_step)
+            return dictOfList2listOfDict(self._multi_agent_call(self._single_step, terminal_step))
         else:
-            return self._single_step(decision_step)
+            return dictOfList2listOfDict(self._multi_agent_call(self._single_step, decision_step))
 
-    def _single_step(self, info: Union[DecisionSteps, TerminalSteps]) -> GymStepResult:
+    def _single_step(self, info: Union[DecisionSteps, TerminalSteps], name: str) -> GymStepResult:
         if self._allow_multiple_obs:
             visual_obs = self._get_vis_obs_list(info)
             visual_obs_list = []
             for obs in visual_obs:
                 visual_obs_list.append(self._preprocess_single(obs[0]))
             default_observation = visual_obs_list
-            if self._get_vec_obs_size() >= 1:
+            if self._get_vec_obs_size(name) >= 1:
                 default_observation.append(self._get_vector_obs(info)[0, :])
         else:
-            if self._get_n_vis_obs() >= 1:
+            if self._get_n_vis_obs(name) >= 1:
                 visual_obs = self._get_vis_obs_list(info)
                 default_observation = self._preprocess_single(visual_obs[0][0])
             else:
                 default_observation = self._get_vector_obs(info)[0, :]
 
-        if self._get_n_vis_obs() >= 1:
+        if self._get_n_vis_obs(name) >= 1:
             visual_obs = self._get_vis_obs_list(info)
             self.visual_obs = self._preprocess_single(visual_obs[0][0])
 
@@ -227,16 +236,33 @@ class UnityToGymWrapper(gym.Env):
         else:
             return single_visual_obs
 
-    def _get_n_vis_obs(self) -> int:
+    def _multi_agent_call(self, fn, inps, idcs=None):
+        out = dict()
+        fn_args = inspect.getfullargspec(fn).args
+        use_partial_fn = 'name' in fn_args
+        for name, inp in inps.items():
+            partial_fn = partial(fn, name=name) if use_partial_fn else fn
+            res = partial_fn(inp)
+            if idcs is None:
+                out[name] = res
+            elif isinstance(idcs, int):
+                out[name] = res[idcs]
+            elif isinstance(idcs, list):
+                out[name] = [res[idx] for idx in idcs]
+            else:
+                raise ValueError('idcs should be None, an int, or a list.')
+        return out
+
+    def _get_n_vis_obs(self, name: str) -> int:
         result = 0
-        for obs_spec in self.group_spec.observation_specs:
+        for obs_spec in self.group_spec[name].observation_specs:
             if len(obs_spec.shape) == 3:
                 result += 1
         return result
 
-    def _get_vis_obs_shape(self) -> List[Tuple]:
+    def _get_vis_obs_shape(self, name: str) -> List[Tuple]:
         result: List[Tuple] = []
-        for obs_spec in self.group_spec.observation_specs:
+        for obs_spec in self.group_spec[name].observation_specs:
             if len(obs_spec.shape) == 3:
                 result.append(obs_spec.shape)
         return result
@@ -259,9 +285,9 @@ class UnityToGymWrapper(gym.Env):
                 result.append(obs)
         return np.concatenate(result, axis=1)
 
-    def _get_vec_obs_size(self) -> int:
+    def _get_vec_obs_size(self, name) -> int:
         result = 0
-        for obs_spec in self.group_spec.observation_specs:
+        for obs_spec in self.group_spec[name].observation_specs:
             if len(obs_spec.shape) == 1:
                 result += obs_spec.shape[0]
         return result
@@ -283,13 +309,6 @@ class UnityToGymWrapper(gym.Env):
         logger.warning("Could not seed environment %s", self.name)
         return
 
-    @staticmethod
-    def _check_agents(n_agents: int) -> None:
-        if n_agents > 1:
-            raise UnityGymException(
-                f"There can only be one Agent in the environment but {n_agents} were detected."
-            )
-
     @property
     def metadata(self):
         return {"render.modes": ["rgb_array"]}
@@ -305,6 +324,10 @@ class UnityToGymWrapper(gym.Env):
     @property
     def observation_space(self):
         return self._observation_space
+
+    @property
+    def behavior_name(self):
+        return self.name
 
 
 class ActionFlattener:

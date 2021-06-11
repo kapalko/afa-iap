@@ -1,112 +1,134 @@
 import os
 import sys
+from functools import partial
 import numpy as np
 from typing import Any, Dict, List, Tuple, Union
-import cv2
 
-import gym
 from gym import error, spaces
 
-from mlagents_envs.base_env import BaseEnv
-from mlagents_envs.base_env import DecisionSteps, TerminalSteps
-from mlagents_envs import logging_util
 from mlagents_envs.environment import UnityEnvironment
+from mlagents_envs.base_env import DecisionSteps, TerminalSteps
 from mlagents_envs.side_channel.environment_parameters_channel import EnvironmentParametersChannel
 
-from .gym_unity import UnityToGymWrapper, GymStepResult
+from .gym_unity import UnityToGymWrapper, GymStepResult, logger
+from .env_utils import *
 
 
 class Refueling(UnityToGymWrapper):
-    DISTANCE_MAX = 1000.
-
     def __init__(
         self,
+        # [General arguments]
         worker_id: int = 0,
         seed: int = 0,
         uint8_visual: bool = False,
         flatten_branched: bool = False,
         allow_multiple_obs: bool = False,
-        stacked_vec_obs: int = 1,
-        no_graphics: bool = False,
-        log_folder: str = None,
-        input_mode: int = 3, # (1) pitch-only control (2) pitch and throttle (3) all controls
-        randomize_fighter_start_pose: bool = True,
-        randomize_fighter_start_thrust: bool = False,
-        reward_mode: int = 1
+        no_graphics: bool = False, # turn off rendering
+        log_folder: str = None, # directory to logs
+        env_build: str = None, # path to Unity build; Set to None to use default relative path
+        timeout_wait: int = 600, # timeouot for RPC communication between Unity and python
+        # [Game-specific arguments]
+        input_mode: float = 3, # 1: thrust only, 2: thrust and roll, 3: thrust and all axes
+        randomize_fighter_start_pose: float = 1, # greater than 0 for True, otherwise False
+        randomize_fighter_start_thrust: float = 0, # greater than 0 for True, otherwise False
+        use_episode_countdown: float = 0,   # greater than 0 for True, otherwise False
+        random_seed: float = 0, #0 means let Unity set random seed
     ):
+        # Instantiate Unity environment
         dirname = os.path.dirname(__file__)
-        if sys.platform == "darwin":
-            env_build = os.path.join(dirname, '../../builds/Refueling/Mac')
-        elif sys.platform == 'win32':
-            env_build = os.path.join(dirname, '..\\..\\builds\\Refueling\\Windows\\Refueling.exe')
-        elif sys.platform == 'linux':
-            env_build =  os.path.join(dirname, '../../builds/Refueling/Linux/Refueling.x86_64')
-        channel = EnvironmentParametersChannel()
+        if env_build is None:
+            if sys.platform == "darwin":
+                env_build = os.path.join(dirname, '../../builds/Refueling/Mac')
+            elif sys.platform == 'win32':
+                env_build = os.path.join(dirname, '..\\..\\builds\\Refueling\\Windows\\Refueling.exe')
+            elif sys.platform == 'linux':
+                env_build =  os.path.join(dirname, '../../builds/Refueling/Linux/Refueling.x86_64')
+        self.channel = EnvironmentParametersChannel()
         unity_env = UnityEnvironment(env_build,
                                      seed=seed,
                                      worker_id=worker_id,
                                      no_graphics=no_graphics,
-                                     side_channels=[channel],
+                                     side_channels=[self.channel],
+                                     timeout_wait=timeout_wait,
                                      log_folder=log_folder)
-        channel.set_float_parameter("input_mode", float(input_mode))
-        channel_inp = 1. if randomize_fighter_start_pose else 0.
-        channel.set_float_parameter("randomize_fighter_start_pose", channel_inp)
-        channel_inp = 1. if randomize_fighter_start_thrust else 0.
-        channel.set_float_parameter("randomize_fighter_start_thrust", channel_inp)
+
+        # Set channel params
+        self.channel.set_float_parameter('input_mode', input_mode)
+        self.channel.set_float_parameter('randomize_fighter_start_pose', randomize_fighter_start_pose)
+        self.channel.set_float_parameter('randomize_fighter_start_thrust', randomize_fighter_start_thrust)
+        self.channel.set_float_parameter('use_episode_countdown', use_episode_countdown)
+        self.channel.set_float_parameter('random_seed', random_seed)
+
+        # Instantiate gym-unity
         super(Refueling, self).__init__(unity_env=unity_env,
                                         uint8_visual=uint8_visual,
                                         flatten_branched=flatten_branched,
-                                        allow_multiple_obs=allow_multiple_obs,
-                                        stacked_vec_obs=stacked_vec_obs)
-        
-        if input_mode == 1:
-            # don't change self.action_size as this is used internally in the class
-            high = np.array([1] * 1)
-            self._action_space = spaces.Box(-high, high, dtype=np.float32)
-        elif input_mode == 2:
-            high = np.array([1] * 2)
-            self._action_space = spaces.Box(-high, high, dtype=np.float32)
+                                        allow_multiple_obs=allow_multiple_obs)
+
+        # Modify action space based on input mode
+        if flatten_branched:
+            if input_mode == 1:
+                self._action_space = spaces.Discrete(3)
+            elif input_mode == 2:
+                self._action_space = spaces.Discrete(6)
+        else:
+            if input_mode == 1:
+                self._action_space = spaces.MultiDiscrete([3])
+            elif input_mode == 2:
+                self._action_space = spaces.MultiDiscrete([3, 3])
         self._input_mode = input_mode
-        self._reward_mode = reward_mode
+
+        # Modify observation space for reordered raycast and drop ball pose
+        self._sensor_obs_shape = (19, 33)
+        self._sensor_reorder_mat = generate_reorder_mat(self._sensor_obs_shape[1])
+        self.process_sensor_obs = partial(process_raycast, \
+            obs_shape=self._sensor_obs_shape, reorder_mat=self._sensor_reorder_mat)
+
+        raw_sensor_obs_shape = 2 * np.prod(self._sensor_obs_shape)
+        raw_vec_obs_shape = 11
+        self._waypoint_idcs = range(-raw_vec_obs_shape, -raw_vec_obs_shape + 3)
+        self._ballpose_idcs = range(-raw_vec_obs_shape + 3, -raw_vec_obs_shape + 6)
+        assert self._observation_space.shape[0] == (raw_sensor_obs_shape + raw_vec_obs_shape)
+
+        self._observation_space = spaces.Tuple([
+            spaces.Box(low=np.zeros(self._sensor_obs_shape, dtype=np.uint8),
+                       high=np.ones(self._sensor_obs_shape, dtype=np.uint8) * 255,
+                       dtype=np.uint8),
+            spaces.Box(low=self._observation_space.low[-raw_vec_obs_shape:],
+                       high=self._observation_space.high[-raw_vec_obs_shape:],
+                       dtype=np.float64)
+        ])
+
+    @staticmethod
+    def get_pitch_action(action: List[Any], dummy=1) -> np.array: # action is 0, 1, 2; 1 is neutral
+        """Just use pitch commands"""
+        return np.array([dummy, action[0], dummy, dummy])
+
+    @staticmethod
+    def get_pitch_throttle_action(action: List[Any], dummy=1) -> np.array:
+        """Just use pitch/throttle commands"""
+        return np.array([dummy, action[0], dummy, action[1]])
 
     def step(self, action: List[Any]) -> GymStepResult:
-        dummy = 0.
-        if self._input_mode == 1:
-            action = np.array([action[0], dummy, dummy]) # pitch
-        elif self._input_mode == 2:
-            action = np.array([action[0], action[1], dummy]) # pitch + throttle
-
+        # action in unity: (roll, pitch, yaw, throttle)
+        if self._input_mode == 1: # pitch only
+            action = self.get_pitch_action(action)
+        elif self._input_mode == 2: # pitch+throttle
+            action = self.get_pitch_throttle_action(action)
+        # otherwise, assume the input mode is 3
         return super().step(action)
 
     def _single_step(self, info: Union[DecisionSteps, TerminalSteps]) -> GymStepResult:
         (obs, rew, done, _info) = super()._single_step(info)
 
-        self._recompute_reward(obs, rew)
+        _info['waypoint'] = obs[self._waypoint_idcs]
+        _info['ball'] = obs[self._ballpose_idcs]
 
-        return (obs, rew, done, _info)
+        start, end = 0, np.prod(self._sensor_obs_shape) * 2
+        sensor_obs = self.process_sensor_obs(obs[start:end])
 
-    def _recompute_reward(self, obs, rew):
-        distance_to_edge = obs[-1] * self.DISTANCE_MAX # NOTE: remember to accomodate stacked observation
-        distance_thresh = 10.
-        in_envelope = distance_to_edge <= distance_thresh
-        if self._reward_mode == 1: # original reward (inverse distance reward + survival reward 0.01)
-            rew = rew
-        elif self._reward_mode == 2: # inverse distance reward
-            distance_rew = 1. / max(1., distance_to_edge)
-            rew = distance_rew
-        elif self._reward_mode == 3: # sparse reward
-            rew = 1. if in_envelope else 0.0
-        elif self._reward_mode == 4: # linear distance reward
-            multiplier = 0.1
-            clipped_distance = max(distance_thresh, distance_to_edge)
-            rew = (self.DISTANCE_MAX - clipped_distance) / self.DISTANCE_MAX * multiplier
-        elif self._reward_mode == 5: # incremental distance reward
-            if not hasattr(self, "prev_distance_to_edge"):
-                self.prev_distance_to_edge = distance_to_edge
-            delta_distance = self.prev_distance_to_edge - distance_to_edge
-            rew = (delta_distance / self.DISTANCE_MAX) if distance_to_edge > distance_thresh else 1.
-            self.prev_distance_to_edge = distance_to_edge
-        else:
-            raise NotImplementedError("Reward mode {} is not supported".format(self._reward_mode))
+        vec_obs = obs[end:]
 
-        return rew
+        obs = [sensor_obs, vec_obs]
+
+        return obs, rew, done, _info
