@@ -39,7 +39,8 @@ These instructions assume you have either [Anaconda](https://www.anaconda.com/pr
 
 
 5. Play around in the provided notebook with some starter code
-  - In your terminal, `jupyter notebook`
+  - In your terminal, return to the main repo directory
+  - In your terminal, launch jupyter: `jupyter notebook`
   - Navigate to `examples\Getting_Started.ipynb`
 
 
