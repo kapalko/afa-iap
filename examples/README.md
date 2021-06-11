@@ -6,7 +6,7 @@ __Instructions for getting AFA running locally.__
 
 These instructions assume you have either [Anaconda](https://www.anaconda.com/products/individual) or [Miniconda](https://docs.conda.io/en/latest/miniconda.html) installed.
 
-1. Download the DroneDodgeball environment
+1. Download the AerialRefueling environment
   - Use this [Link](https://drive.google.com/file/d/1fVh5m3gEXIQyZq_igtIQyNs-zD0TnBmc/view?usp=sharing) to download the zip file
   - Extract the environment and place in the `baselines\airforce-arcade\builds` directory
   - If on MacOS, right click + open the `.app` file to accept the security warning
