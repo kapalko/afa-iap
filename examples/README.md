@@ -25,7 +25,7 @@ These instructions assume you have either [Anaconda](https://www.anaconda.com/pr
     - `pip install gym`
     - `conda install -c conda-forge notebook`
     - `conda install matplotlib`
-    - `pip install ray[rllib]`
+    - `pip install 'ray[rllib]'`
 
 
 3. Install the Air Force Arcade package
