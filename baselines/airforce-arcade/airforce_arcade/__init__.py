@@ -1,7 +1,7 @@
 from gym.envs.registration import register
 
-envs_list = ['TestingRoomICRA-v0', 'DroneDodgeBall-v0', 'Refueling-v0', 
-             'TimedWaypoints-v0', 'InfiniteMazeScene-v0']
+envs_list = ['TestingRoomICRA-v0', 'DroneDodgeBall-v0', 'Refueling-v0',
+             'TimedWaypoints-v0', 'CanyonRun-v0', 'DroneTag-v0', 'FireandIce-v0', 'DroneDuel-v0']
 
 register(
     id='TestingRoomICRA-v0',
@@ -26,4 +26,19 @@ register(
 register(
     id='CanyonRun-v0',
     entry_point='airforce_arcade.envs:CanyonRun'
+)
+
+register(
+    id='DroneTag-v0',
+    entry_point='airforce_arcade.envs:DroneTag'
+)
+
+register(
+    id='FireandIce-v0',
+    entry_point='airforce_arcade.envs:FireandIce'
+)
+
+register(
+    id='DroneDuel-v0',
+    entry_point='airforce_arcade.envs:DroneDuel'
 )
