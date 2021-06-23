@@ -111,3 +111,4 @@ crashlytics-build.properties
  summaries/
  .ds_store
 examples/Navigation-Final.ipynb
+*.pth
