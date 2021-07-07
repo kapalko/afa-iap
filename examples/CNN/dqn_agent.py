@@ -2,6 +2,7 @@ import numpy as np
 import random
 from collections import namedtuple, deque
 import itertools
+import torchvision.transforms as transforms
 
 from model import QNetwork
 
@@ -30,7 +31,7 @@ class Agent():
     
     """Interacts with and learns from the environment."""
 
-    def __init__(self, state_size, action_size, seed):
+    def __init__(self, viz_state_size, vec_state_size, action_size, seed):
         """Initialize an Agent object.
         
         Params
@@ -39,15 +40,17 @@ class Agent():
             action_size (int): dimension of each action
             seed (int): random seed
         """
-        self.state_size = state_size
+        self.viz_state_size = viz_state_size
+        self.vec_state_size = vec_state_size
         self.action_size = action_size
         self.seed = random.seed(seed)
 
         # Q-Network
-        print('State Size: {}'.format(state_size))
+        print('Visual State Size: {}'.format(viz_state_size))
+        print('Vector State Size: {}'.format(vec_state_size))
         print('Action_size: {}'.format(action_size))
-        self.qnetwork_local = QNetwork(state_size, action_size, seed).to(device)
-        self.qnetwork_target = QNetwork(state_size, action_size, seed).to(device)
+        self.qnetwork_local = QNetwork(vec_state_size, action_size, seed).to(device)
+        self.qnetwork_target = QNetwork(vec_state_size, action_size, seed).to(device)
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=LR)
 
         # Replay memory
@@ -62,6 +65,10 @@ class Agent():
     
     def step(self, state, action, reward, next_state, done):
         # Save experience in replay memory
+        ### TODO ###
+        ### TypeError: can't convert np.ndarray of type numpy.object_. The only supported types are: float64, float32, float16, complex64, complex128, 
+        ### int64, int32, int16, int8, uint8, and bool.
+        ### Need to convert state and next_state to a type that can be saved in experiences
         self.memory.add(state, action, reward, next_state, done)
         
         # Learn every UPDATE_EVERY time steps.
@@ -80,10 +87,11 @@ class Agent():
             state (array_like): current state
             eps (float): epsilon, for epsilon-greedy action selection
         """
-        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
+        state_img, state_vec = self.preprocess(state)
+        state_vec = torch.from_numpy(state_vec).float().unsqueeze(0).to(device)
         self.qnetwork_local.eval()
         with torch.no_grad():
-            action_values = self.qnetwork_local(state)
+            action_values = self.qnetwork_local(state_img[None], state_vec)
         self.qnetwork_local.train()
 
         # Epsilon-greedy action selection
@@ -106,12 +114,14 @@ class Agent():
 
         ## Compute and minimize the loss
         # Get max predicted Q values (for next states) from target model
-        Q_targets_next = self.qnetwork_target(next_states).detach().max(1)[0].unsqueeze(1)
+        next_img, next_vec = self.preprocess(next_states)
+        Q_targets_next = self.qnetwork_target(next_img[None], next_vec).detach().max(1)[0].unsqueeze(1)
         # Compute Q targets for the current states
         Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
         
         # Get expected Q values from the local model
-        Q_expected = self.qnetwork_local(states).gather(1, actions)
+        states_img, states_vec = self.preprocess(states)
+        Q_expected = self.qnetwork_local(states_img[None], states_vec).gather(1, actions)
         
         # Compute the loss
         loss = F.mse_loss(Q_expected, Q_targets)
@@ -135,6 +145,24 @@ class Agent():
         """
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
             target_param.data.copy_(tau*local_param.data + (1.0-tau)*target_param.data)
+            
+    def preprocess(self, state):
+        """Preprocess the sensor observation into a standard grayscale image and separates from attitude vector
+    
+        Params
+        ======
+            obs (tuple of Box): A tuple of sensor observations type box and attitude/waypoint information type box
+        """
+        state_img = state[0].astype('float32')/255
+        state_img = self.image_loader(state_img)
+        state_vec = state[1]
+        return state_img, state_vec
+    
+    def image_loader(self, state_img):
+        """Load an image and return a tensor"""
+        loader = transforms.Compose([transforms.ToTensor()])
+        img = loader(state_img)
+        return img
 
 
 class ReplayBuffer:
